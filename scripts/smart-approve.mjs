@@ -347,19 +347,27 @@ function getRecentUserMessages(transcriptPath) {
     for (const line of recentLines) {
       try {
         const entry = JSON.parse(line);
-        // 유저 메시지 형식: role === 'human' 또는 type === 'human'
-        if (entry.role === 'user' || entry.role === 'human' || entry.type === 'human') {
-          const text = typeof entry.content === 'string'
-            ? entry.content
-            : Array.isArray(entry.content)
-              ? entry.content
-                  .filter(b => b.type === 'text')
-                  .map(b => b.text)
-                  .join(' ')
-              : '';
-          if (text.trim()) {
-            userMessages.push(text.trim());
-          }
+        // transcript 형식: entry.type === 'user', 텍스트는 entry.message.content
+        if (entry.type !== 'user') continue;
+
+        const content = entry.message?.content ?? entry.content;
+        let text = '';
+
+        if (typeof content === 'string') {
+          // XML 태그로 시작하면 시스템/커맨드 메시지이므로 스킵
+          if (content.startsWith('<')) continue;
+          text = content;
+        } else if (Array.isArray(content)) {
+          // [{type: 'text', text: '...'}, ...] 형식
+          text = content
+            .filter(b => b.type === 'text')
+            .map(b => b.text)
+            .filter(t => !t.startsWith('<'))
+            .join(' ');
+        }
+
+        if (text.trim()) {
+          userMessages.push(text.trim());
         }
       } catch { /* skip malformed lines */ }
     }
