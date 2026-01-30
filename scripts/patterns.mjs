@@ -4,6 +4,9 @@ export const READONLY_PATTERNS = [
   /^(ls|dir|tree|find|where|which|file|stat|wc|du|df)\b/,
   /^(cat|type|head|tail|less|more|bat)\b/,
 
+  // 디렉토리 이동
+  /^cd\b/,
+
   // 시스템 정보
   /^(echo|printf|pwd|whoami|hostname|uname|date|uptime|env|set|printenv)\b/,
 

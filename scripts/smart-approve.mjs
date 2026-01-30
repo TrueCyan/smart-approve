@@ -1,6 +1,7 @@
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'fs';
 import { execSync } from 'child_process';
-import { resolve, isAbsolute } from 'path';
+import { resolve, isAbsolute, dirname } from 'path';
+import { homedir } from 'os';
 import {
   READONLY_PATTERNS,
   MODIFYING_PATTERNS,
@@ -9,6 +10,18 @@ import {
   extractNpmScript,
   getLanguage,
 } from './patterns.mjs';
+
+// --- 디버그 로깅 ---
+const DEBUG = process.env.SMART_APPROVE_DEBUG === '1';
+const LOG_PATH = resolve(homedir(), '.claude', 'smart-approve-debug.log');
+
+function debug(msg) {
+  if (!DEBUG) return;
+  try {
+    const ts = new Date().toISOString();
+    appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
+  } catch { /* ignore */ }
+}
 
 // --- stdin 읽기 ---
 let input;
@@ -26,8 +39,11 @@ if (toolName !== 'Bash' || !command) {
   process.exit(0);
 }
 
+debug(`Command: ${command}`);
+
 // --- 1단계: 규칙 기반 판단 ---
 const ruleResult = analyzeByRules(command);
+debug(`Step 1 (rules): ${ruleResult}`);
 
 if (ruleResult === 'readonly') {
   outputAllow('Rule-based: read-only command');
@@ -35,14 +51,21 @@ if (ruleResult === 'readonly') {
 }
 
 if (ruleResult === 'modifying') {
-  // 기본 플로우 (사용자에게 물어봄)
   process.exit(0);
 }
 
 // --- 2단계: npm/yarn/pnpm scripts 분석 ---
-const npmScript = extractNpmScript(command);
+// compound 명령(cd ... && npm run dev)에서 각 서브커맨드를 확인
+const subCommands = command.split(/\s*&&\s*|\s*\|\|\s*|\s*;\s*/).map(s => s.trim()).filter(Boolean);
+let npmScript = null;
+for (const sub of subCommands) {
+  npmScript = extractNpmScript(sub);
+  if (npmScript) break;
+}
 if (npmScript) {
-  const npmResult = analyzeNpmScript(npmScript, input.cwd);
+  const effectiveCwd = resolveCdTarget(command, input.cwd) || input.cwd;
+  debug(`Step 2 (npm): script="${npmScript}", cwd="${effectiveCwd}"`);
+  const npmResult = analyzeNpmScript(npmScript, effectiveCwd);
   if (npmResult === 'readonly') {
     outputAllow(`npm script analysis: "${npmScript}" resolved to read-only command`);
     process.exit(0);
@@ -68,7 +91,9 @@ if (scriptPath) {
 
 // --- 4단계: Claude에게 판단 위임 (애매한 경우만) ---
 const userContext = getRecentUserMessages(input.transcript_path);
+debug(`Step 4 (LLM): transcript="${input.transcript_path}", userContext="${userContext?.slice(0, 100)}..."`);
 const llmResult = askClaude(command, scriptPath, input.cwd, userContext);
+debug(`Step 4 result: ${llmResult}`);
 if (llmResult === 'approve') {
   outputAllow('LLM analysis: approved (read-only or user-consented)');
   process.exit(0);
@@ -80,6 +105,17 @@ process.exit(0);
 // ============================================================
 // 함수 정의
 // ============================================================
+
+function resolveCdTarget(cmd, fallbackCwd) {
+  // cd "path" && ... 에서 path를 추출
+  const match = cmd.match(/^cd\s+["']?([^"'&;|]+?)["']?\s*(?:&&|;|\|\|)/);
+  if (match) {
+    const target = match[1].trim();
+    if (isAbsolute(target)) return target;
+    if (fallbackCwd) return resolve(fallbackCwd, target);
+  }
+  return null;
+}
 
 function analyzeNpmScript(scriptName, cwd) {
   // package.json을 찾아서 scripts 필드에서 실제 명령어를 읽어온다
@@ -318,10 +354,11 @@ Command: ${cmd}`;
   prompt += `\n\nRespond with ONLY one word: "APPROVE" or "DENY".`;
 
   try {
-    const escaped = prompt.replace(/"/g, '\\"').replace(/`/g, '\\`');
+    // stdin으로 프롬프트 전달 (이스케이핑 문제 방지)
     const result = execSync(
-      `claude -p --model haiku --max-turns 1 --no-session-persistence "${escaped}"`,
+      `claude -p --model haiku --max-turns 1 --no-session-persistence`,
       {
+        input: prompt,
         timeout: 15000,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -332,8 +369,8 @@ Command: ${cmd}`;
     if (answer === 'APPROVE' || answer.includes('APPROVE')) return 'approve';
     if (answer === 'DENY' || answer.includes('DENY')) return 'deny';
     return 'ambiguous';
-  } catch {
-    // 타임아웃, CLI 없음, 에러 → 안전하게 기본 플로우
+  } catch (err) {
+    debug(`LLM error: ${err.message}`);
     return 'ambiguous';
   }
 }
