@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ". \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/smart-approve.mjs\" || fnm exec -- node \"${CLAUDE_PLUGIN_ROOT}/scripts/smart-approve.mjs\"",
             "timeout": 20000
           }
         ]
