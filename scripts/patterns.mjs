@@ -10,6 +10,9 @@ export const READONLY_PATTERNS = [
   // 시스템 정보
   /^(echo|printf|pwd|whoami|hostname|uname|date|uptime|env|set|printenv)\b/,
 
+  // 셸 환경 로드
+  /^(source|\.)\s/,
+
   // Git 읽기 전용
   /^git\s+(status|log|diff|show|branch|tag|remote|stash\s+list|describe|rev-parse|config\s+--get|config\s+-l|shortlog|blame|reflog)\b/,
 
@@ -68,6 +71,7 @@ export const MODIFYING_PATTERNS = [
   /^(npm|yarn|pnpm)\s+(install|uninstall|add|remove|update|upgrade|link|publish|init)\b/,
   /^pip\s+(install|uninstall)\b/,
   /^dotnet\s+(add|remove|new|publish|restore)\b/,
+  /^winget\s+(install|uninstall|upgrade)\b/,
 
   // Git 수정
   /^git\s+(push|reset|clean|checkout\s+\.|restore\s+\.|rebase|merge|cherry-pick|revert|rm|mv)\b/,

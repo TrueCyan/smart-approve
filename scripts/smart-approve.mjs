@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, appendFileSync, writeFileSync, unlinkSync } from 'fs';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { resolve, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
 import {
@@ -37,8 +37,8 @@ function acquireLock() {
         const content = readFileSync(LOCK_PATH, 'utf8').trim();
         const lockTime = parseInt(content, 10);
         if (!isNaN(lockTime) && Date.now() - lockTime < LOCK_STALE_MS) {
-          // 아직 유효한 락 → 대기
-          execSync(`node -e "setTimeout(()=>{},${LOCK_WAIT_MS})"`, { stdio: 'ignore' });
+          // 아직 유효한 락 → 대기 (sleep via spawnSync)
+          spawnSync('node', ['-e', `setTimeout(()=>{},${LOCK_WAIT_MS})`], { stdio: 'ignore', timeout: LOCK_WAIT_MS + 2000 });
           continue;
         }
         // stale 락 → 덮어쓰기
