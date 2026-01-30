@@ -69,8 +69,8 @@ if (scriptPath) {
 // --- 4단계: Claude에게 판단 위임 (애매한 경우만) ---
 const userContext = getRecentUserMessages(input.transcript_path);
 const llmResult = askClaude(command, scriptPath, input.cwd, userContext);
-if (llmResult === 'readonly') {
-  outputAllow('LLM analysis: predicted read-only');
+if (llmResult === 'approve') {
+  outputAllow('LLM analysis: approved (read-only or user-consented)');
   process.exit(0);
 }
 
@@ -264,26 +264,40 @@ function getRecentUserMessages(transcriptPath) {
 }
 
 function askClaude(cmd, scriptFile, cwd, userContext) {
-  let prompt = `Analyze this bash command and classify it.
+  let prompt = `You are a bash command classifier for a permission system. Determine if a command should be auto-approved.
 
-READONLY means: the command only reads data, displays output, starts a dev server, runs tests, lints code, compiles/builds without deploying, or performs any action that does NOT permanently alter files on disk or make destructive external requests.
+## Classification Rules
 
-MODIFYING means: the command creates/deletes/overwrites files, installs/removes packages, pushes to remote, deploys to production, or sends destructive HTTP requests (POST/PUT/DELETE).
+A command is APPROVE if ANY of the following is true:
+1. It is purely read-only (reads data, displays output, searches, prints info)
+2. The user EXPLICITLY requested this exact action in their recent messages
 
-IMPORTANT: If the user explicitly requested this action in conversation, treat it as user-consented. A user-consented command should be classified as READONLY (the user already agreed to any side effects).
+A command is DENY (requires manual confirmation) if ALL of the following are true:
+1. It has side effects (writes files, installs packages, starts processes, modifies system state, makes network requests)
+2. The user did NOT explicitly request this action
 
-Key examples:
-- "npm run dev" / "npm start" / "npm test" / "npm run build" → READONLY (dev server, test runner, build output is expected)
-- "npm install" / "pip install" → MODIFYING (alters node_modules/venv)
-- "rm -rf dist" / "git push" → MODIFYING
-- "node server.js" / "python app.py" → READONLY (just runs a process)
-- "curl -X POST ..." → MODIFYING
-- User said "start the server" + command is "npm run dev" → READONLY (user consented)
+## Key Principle
+- "Side effects" includes: starting servers/processes, writing files, installing packages, deploying, network mutations
+- Starting a dev server IS a side effect — but if the user said "start the server", they already consented
+- Claude autonomously deciding to run a modifying command without the user asking → DENY
+- Claude running exactly what the user asked for → APPROVE
+
+## Examples
+- Command: "ls -la" → APPROVE (read-only)
+- Command: "git status" → APPROVE (read-only)
+- Command: "npm run dev", user said: "서버 켜줘" → APPROVE (user consented)
+- Command: "npm run dev", user said: "코드 리뷰해줘" → DENY (user didn't ask to start server)
+- Command: "npm install express", user said: "express 설치해줘" → APPROVE (user consented)
+- Command: "npm install lodash", user said: "코드 최적화해줘" → DENY (user didn't ask to install)
+- Command: "rm -rf node_modules", user said: "node_modules 지워줘" → APPROVE (user consented)
+- Command: "rm -rf dist" (no user request) → DENY
 
 Command: ${cmd}`;
 
   if (userContext) {
-    prompt += `\n\nRecent user messages:\n${userContext}`;
+    prompt += `\n\nRecent user messages:\n"""${userContext}"""`;
+  } else {
+    prompt += `\n\nRecent user messages: (none available)`;
   }
 
   // 스크립트 파일이 있으면 내용도 첨부
@@ -301,7 +315,7 @@ Command: ${cmd}`;
     }
   }
 
-  prompt += `\n\nRespond with ONLY one word: "READONLY" or "MODIFYING".`;
+  prompt += `\n\nRespond with ONLY one word: "APPROVE" or "DENY".`;
 
   try {
     const escaped = prompt.replace(/"/g, '\\"').replace(/`/g, '\\`');
@@ -315,8 +329,8 @@ Command: ${cmd}`;
     );
 
     const answer = result.trim().toUpperCase();
-    if (answer === 'READONLY' || answer.includes('READONLY')) return 'readonly';
-    if (answer === 'MODIFYING' || answer.includes('MODIFYING')) return 'modifying';
+    if (answer === 'APPROVE' || answer.includes('APPROVE')) return 'approve';
+    if (answer === 'DENY' || answer.includes('DENY')) return 'deny';
     return 'ambiguous';
   } catch {
     // 타임아웃, CLI 없음, 에러 → 안전하게 기본 플로우
