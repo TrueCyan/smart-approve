@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, appendFileSync, writeFileSync } from 'fs';
+import { readFileSync, existsSync, appendFileSync, writeFileSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
@@ -21,6 +21,175 @@ function debug(msg) {
     const ts = new Date().toISOString();
     appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
   } catch { /* ignore */ }
+}
+
+// --- LLM 호출 락 (동시 호출 방지) ---
+const LOCK_PATH = resolve(homedir(), '.claude', 'smart-approve-llm.lock');
+const LOCK_STALE_MS = 30000;   // 30초 이상 된 락은 stale
+const LOCK_WAIT_MS = 1000;     // 대기 간격 1초
+const LOCK_MAX_WAIT_MS = 10000; // 최대 대기 10초
+
+function acquireLock() {
+  const maxAttempts = Math.floor(LOCK_MAX_WAIT_MS / LOCK_WAIT_MS);
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      if (existsSync(LOCK_PATH)) {
+        const content = readFileSync(LOCK_PATH, 'utf8').trim();
+        const lockTime = parseInt(content, 10);
+        if (!isNaN(lockTime) && Date.now() - lockTime < LOCK_STALE_MS) {
+          // 아직 유효한 락 → 대기
+          execSync(`node -e "setTimeout(()=>{},${LOCK_WAIT_MS})"`, { stdio: 'ignore' });
+          continue;
+        }
+        // stale 락 → 덮어쓰기
+      }
+      writeFileSync(LOCK_PATH, String(Date.now()));
+      return true;
+    } catch {
+      // 파일 접근 실패 → 락 없이 진행
+      return false;
+    }
+  }
+  // 타임아웃 → 락 없이 진행
+  debug('Lock acquisition timed out, proceeding without lock');
+  return false;
+}
+
+function releaseLock() {
+  try {
+    if (existsSync(LOCK_PATH)) {
+      unlinkSync(LOCK_PATH);
+    }
+  } catch { /* ignore */ }
+}
+
+// --- 배치 승인 ---
+const BATCH_PATH = resolve(homedir(), '.claude', 'smart-approve-batch.json');
+const BATCH_TTL_MS = 10 * 60 * 1000; // 10분
+
+const APPROVAL_KEYWORDS = [
+  // 한국어
+  /진행/, /승인/, /실행/, /계속/, /해줘/, /ㅇㅇ/, /^응$/, /^네$/,
+  // 영어
+  /proceed/i, /approve/i, /go\s*ahead/i, /^yes$/i, /continue/i, /^ok$/i,
+];
+
+function loadBatch() {
+  try {
+    if (!existsSync(BATCH_PATH)) return null;
+    const batch = JSON.parse(readFileSync(BATCH_PATH, 'utf8'));
+    // TTL 초과 시 무시
+    if (Date.now() - batch.timestamp > BATCH_TTL_MS) {
+      debug('Batch expired, ignoring');
+      return null;
+    }
+    return batch;
+  } catch {
+    return null;
+  }
+}
+
+function saveBatch(batch) {
+  try {
+    writeFileSync(BATCH_PATH, JSON.stringify(batch, null, 2));
+  } catch { /* ignore */ }
+}
+
+function clearBatch() {
+  try {
+    if (existsSync(BATCH_PATH)) unlinkSync(BATCH_PATH);
+  } catch { /* ignore */ }
+}
+
+function extractPlannedCommands(transcriptPath) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return [];
+
+  try {
+    const content = readFileSync(transcriptPath, 'utf8');
+    const lines = content.trim().split('\n');
+
+    // 마지막 assistant 메시지를 찾음
+    let lastAssistant = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type === 'assistant') {
+          lastAssistant = entry;
+          break;
+        }
+      } catch { /* skip */ }
+    }
+
+    if (!lastAssistant) return [];
+
+    const messageContent = lastAssistant.message?.content ?? lastAssistant.content;
+    if (!Array.isArray(messageContent)) return [];
+
+    // type === "tool_use" && name === "Bash" 블록에서 command 추출
+    const commands = [];
+    for (const block of messageContent) {
+      if (block.type === 'tool_use' && block.name === 'Bash' && block.input?.command) {
+        commands.push(block.input.command.trim());
+      }
+    }
+
+    return commands;
+  } catch {
+    return [];
+  }
+}
+
+function checkUserApproval(transcriptPath) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return false;
+
+  try {
+    const content = readFileSync(transcriptPath, 'utf8');
+    const lines = content.trim().split('\n');
+
+    // 최근 5줄에서 user 메시지 확인
+    const recentLines = lines.slice(-5);
+    for (let i = recentLines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(recentLines[i]);
+        if (entry.type !== 'user') continue;
+
+        const msgContent = entry.message?.content ?? entry.content;
+        let text = '';
+
+        if (typeof msgContent === 'string') {
+          if (msgContent.startsWith('<')) continue;
+          text = msgContent;
+        } else if (Array.isArray(msgContent)) {
+          text = msgContent
+            .filter(b => b.type === 'text')
+            .map(b => b.text)
+            .filter(t => !t.startsWith('<'))
+            .join(' ');
+        }
+
+        text = text.trim();
+        if (!text) continue;
+
+        // 승인 키워드 매칭
+        if (APPROVAL_KEYWORDS.some(kw => kw.test(text))) {
+          return true;
+        }
+      } catch { /* skip */ }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function outputDeny(reason) {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  }));
 }
 
 // --- 승인 캐시 ---
@@ -116,6 +285,17 @@ if (ruleResult === 'readonly') {
 // readonly도 ambiguous도 아닌 경우 → 2~3단계 스킵하고 4단계(캐시/LLM)로 직행
 if (ruleResult === 'modifying') {
   debug('Step 1: modifying detected, checking user intent...');
+
+  // 배치 승인 확인 (이미 approved 배치가 있으면 바로 allow)
+  const batch = loadBatch();
+  if (batch && batch.sessionId === input.session_id && batch.status === 'approved') {
+    if (batch.commands.includes(command)) {
+      debug('Step 1→batch: approved (batch contains this command)');
+      outputAllow('Batch: previously batch-approved command');
+      process.exit(0);
+    }
+  }
+
   // 캐시 확인
   const cached = checkCache(input.session_id, command);
   debug(`Step 1→cache: ${cached ?? 'miss'}`);
@@ -133,7 +313,8 @@ if (ruleResult === 'modifying') {
     outputAllow('LLM: user-consented modifying command');
     process.exit(0);
   }
-  // LLM도 approve 안 함 → 기본 플로우 (사용자 확인)
+  // LLM도 approve 안 함 → 배치 승인 플로우
+  handleBatchApproval(command, input);
   process.exit(0);
 }
 
@@ -192,7 +373,8 @@ if (llmResult === 'approve') {
   process.exit(0);
 }
 
-// modifying이거나 판단 불가 → 기본 플로우
+// modifying이거나 판단 불가 → 배치 승인 플로우 시도
+handleBatchApproval(command, input);
 process.exit(0);
 
 // ============================================================
@@ -242,9 +424,22 @@ function findPackageJson(startDir) {
   return null;
 }
 
+function unwrapPowershell(cmd) {
+  // powershell -Command "..." 패턴에서 내부 명령을 추출
+  const match = cmd.match(/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*-Command\s+["'](.+?)["']\s*$/i);
+  if (match) {
+    return match[1];
+  }
+  return cmd;
+}
+
 function analyzeByRules(cmd) {
+  // powershell -Command "..." 래핑 해제
+  cmd = unwrapPowershell(cmd);
+
   // 파이프/체인 명령은 개별 명령 모두 확인
-  const subCommands = cmd.split(/\s*[|&;]\s*/).map(s => s.trim()).filter(Boolean);
+  // ||와 &&를 먼저 매칭하여 개별 |/&로 분할되지 않도록 함
+  const subCommands = cmd.split(/\s*(?:\|\||&&|[;|])\s*/).map(s => s.trim()).filter(Boolean);
 
   let hasModifying = false;
   for (const sub of subCommands) {
@@ -454,6 +649,7 @@ Command: ${cmd}`;
 
   prompt += `\n\nRespond with ONLY one word: "APPROVE" or "DENY".`;
 
+  acquireLock();
   try {
     // stdin으로 프롬프트 전달 (이스케이핑 문제 방지)
     const result = execSync(
@@ -473,6 +669,8 @@ Command: ${cmd}`;
   } catch (err) {
     debug(`LLM error: ${err.message}`);
     return 'ambiguous';
+  } finally {
+    releaseLock();
   }
 }
 
@@ -485,4 +683,74 @@ function outputAllow(reason) {
     },
   };
   console.log(JSON.stringify(output));
+}
+
+function handleBatchApproval(command, input) {
+  const batch = loadBatch();
+
+  // 1. 기존 approved 배치가 있으면 이 명령이 포함되었는지 확인
+  if (batch && batch.sessionId === input.session_id) {
+    if (batch.status === 'approved') {
+      if (batch.commands.includes(command)) {
+        debug('Batch: command found in approved batch');
+        outputAllow('Batch: approved command in batch');
+        return;
+      }
+      debug('Batch: command NOT in approved batch, falling through');
+      return;
+    }
+
+    if (batch.status === 'pending') {
+      // 사용자 승인 여부 확인
+      if (checkUserApproval(input.transcript_path)) {
+        debug('Batch: user approval detected, approving batch');
+        batch.status = 'approved';
+        saveBatch(batch);
+        if (batch.commands.includes(command)) {
+          outputAllow('Batch: user approved batch');
+          return;
+        }
+      }
+      // pending 상태, 이미 deny 보냄 → exit(0)으로 기본 플로우
+      debug('Batch: already pending, waiting for user approval');
+      return;
+    }
+  }
+
+  // 2. 새로운 배치 생성
+  const plannedCommands = extractPlannedCommands(input.transcript_path);
+  debug(`Batch: extracted ${plannedCommands.length} planned commands`);
+
+  if (plannedCommands.length === 0) {
+    // 계획된 명령어가 없으면 배치 생성 불가 → 기본 플로우
+    return;
+  }
+
+  // modifying 명령어만 필터링
+  const modifyingCommands = plannedCommands.filter(cmd => {
+    const result = analyzeByRules(cmd);
+    return result === 'modifying' || result === 'ambiguous';
+  });
+
+  if (modifyingCommands.length === 0) {
+    return;
+  }
+
+  // 요약 메시지 생성
+  const summary = '다음 변경사항을 실행하려 합니다:\n' +
+    modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n') +
+    '\n계속 진행하려면 "진행해줘"라고 말씀해 주세요.';
+
+  // 배치 저장
+  const newBatch = {
+    sessionId: input.session_id,
+    commands: modifyingCommands,
+    status: 'pending',
+    summary,
+    timestamp: Date.now(),
+  };
+  saveBatch(newBatch);
+
+  debug(`Batch: created pending batch with ${modifyingCommands.length} commands`);
+  outputDeny(summary);
 }

@@ -23,7 +23,7 @@ export const READONLY_PATTERNS = [
   /^npx\s+--yes\s+(which|envinfo)\b/,
 
   // 버전 관리 도구 조회
-  /^(nvm|fnm|volta)\s+(list|ls|current|use|which|version)\b/,
+  /^(nvm|fnm|volta)\s+(list|ls|current|use|which|version|exec)\b/,
 
   // Python 읽기 전용
   /^python3?\s+(-c|--version)\b/,
@@ -31,6 +31,12 @@ export const READONLY_PATTERNS = [
 
   // .NET 읽기 전용
   /^dotnet\s+(--list-sdks|--list-runtimes|--info|--version|nuget\s+list)\b/,
+
+  // sed 읽기 전용 (sed -i 제외)
+  /^sed\b(?!.*\s-i)/,
+
+  // Windows 패키지 매니저 읽기 전용
+  /^winget\s+(list|show|search)\b/,
 
   // 검색
   /^(grep|rg|ag|findstr|select-string)\b/,
@@ -55,8 +61,8 @@ export const MODIFYING_PATTERNS = [
   /^(rm|del|rmdir|mkdir|mv|cp|move|copy|xcopy|robocopy|touch|chmod|chown|chgrp|ln)\b/,
   /^(rename|ren)\b/,
 
-  // 리다이렉션 (파일 쓰기) — 2>/dev/null (stderr 억제)은 제외
-  /(?<![0-9])>{1,2}\s*(?!\/dev\/null)/,
+  // 리다이렉션 (파일 쓰기) — 2>/dev/null, 2>$null (stderr 억제)은 제외
+  /(?<![0-9])>{1,2}\s*(?!\/dev\/null|\$null)/,
 
   // 패키지 설치/제거
   /^(npm|yarn|pnpm)\s+(install|uninstall|add|remove|update|upgrade|link|publish|init)\b/,
@@ -125,7 +131,7 @@ export const SCRIPT_WRITE_PATTERNS = {
     /\bpathlib\.Path\([^)]*\)\.(write_text|write_bytes|mkdir|rmdir|unlink|rename|touch)\b/,
   ],
   sh: [
-    /(?<![0-9])>{1,2}\s*(?!\/dev\/null)/,
+    /(?<![0-9])>{1,2}\s*(?!\/dev\/null|\$null)/,
     /\b(rm|mv|cp|mkdir|touch|chmod|chown|sed\s+-i|dd)\b/,
     /\bcurl\b.*(-X\s*(POST|PUT|DELETE|PATCH)|-d\s|--data)/,
     /\bwget\b/,
