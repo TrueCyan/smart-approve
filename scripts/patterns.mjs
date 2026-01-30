@@ -13,6 +13,9 @@ export const READONLY_PATTERNS = [
   // Git 읽기 전용
   /^git\s+(status|log|diff|show|branch|tag|remote|stash\s+list|describe|rev-parse|config\s+--get|config\s+-l|shortlog|blame|reflog)\b/,
 
+  // Git 로컬 변경 (쉽게 되돌릴 수 있는 작업)
+  /^git\s+(add|commit|stash\s+(save|push))\b/,
+
   // Node.js / npm 읽기 전용
   /^(npm|yarn|pnpm)\s+(list|ls|info|view|outdated|audit|why|config\s+get|config\s+list)\b/,
   /^node\s+(-e|--eval)\s+/,
