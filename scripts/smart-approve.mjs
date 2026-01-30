@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, appendFileSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
@@ -11,8 +11,8 @@ import {
   getLanguage,
 } from './patterns.mjs';
 
-// --- 디버그 로깅 ---
-const DEBUG = process.env.SMART_APPROVE_DEBUG === '1';
+// --- 디버그 로깅 (항상 켜짐, SMART_APPROVE_DEBUG=0 으로 끌 수 있음) ---
+const DEBUG = process.env.SMART_APPROVE_DEBUG !== '0';
 const LOG_PATH = resolve(homedir(), '.claude', 'smart-approve-debug.log');
 
 function debug(msg) {
@@ -21,6 +21,68 @@ function debug(msg) {
     const ts = new Date().toISOString();
     appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
   } catch { /* ignore */ }
+}
+
+// --- 승인 캐시 ---
+const CACHE_PATH = resolve(homedir(), '.claude', 'smart-approve-cache.json');
+
+function loadCache() {
+  try {
+    if (!existsSync(CACHE_PATH)) return {};
+    return JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(cache) {
+  try {
+    writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2));
+  } catch { /* ignore */ }
+}
+
+function getCacheKey(cmd) {
+  // 경로 부분을 정규화하여 같은 의미의 명령이 매칭되도록
+  // cd "path" && npm run dev → npm run dev@path
+  const cdMatch = cmd.match(/^cd\s+["']?([^"'&;|]+?)["']?\s*(?:&&|;|\|\|)\s*(.+)/);
+  if (cdMatch) {
+    return `${cdMatch[2].trim()}@${cdMatch[1].trim()}`;
+  }
+  return cmd;
+}
+
+function checkCache(sessionId, cmd) {
+  const cache = loadCache();
+  const key = getCacheKey(cmd);
+  const entry = cache[key];
+  if (!entry) return null;
+
+  // 같은 세션이면 캐시 히트
+  if (entry.sessionId === sessionId) {
+    return entry.decision;
+  }
+
+  // 다른 세션이라도 24시간 이내면 캐시 히트
+  const age = Date.now() - entry.timestamp;
+  if (age < 24 * 60 * 60 * 1000) {
+    return entry.decision;
+  }
+
+  return null;
+}
+
+function updateCache(sessionId, cmd, decision) {
+  const cache = loadCache();
+  const key = getCacheKey(cmd);
+  cache[key] = { sessionId, decision, timestamp: Date.now() };
+
+  // 오래된 항목 정리 (7일 이상)
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  for (const [k, v] of Object.entries(cache)) {
+    if (v.timestamp < cutoff) delete cache[k];
+  }
+
+  saveCache(cache);
 }
 
 // --- stdin 읽기 ---
@@ -67,6 +129,7 @@ if (npmScript) {
   debug(`Step 2 (npm): script="${npmScript}", cwd="${effectiveCwd}"`);
   const npmResult = analyzeNpmScript(npmScript, effectiveCwd);
   if (npmResult === 'readonly') {
+    updateCache(input.session_id, command, 'approve');
     outputAllow(`npm script analysis: "${npmScript}" resolved to read-only command`);
     process.exit(0);
   }
@@ -89,12 +152,21 @@ if (scriptPath) {
   }
 }
 
-// --- 4단계: Claude에게 판단 위임 (애매한 경우만) ---
+// --- 4단계: 승인 캐시 확인 ---
+const cached = checkCache(input.session_id, command);
+debug(`Step 4 (cache): ${cached ?? 'miss'}`);
+if (cached === 'approve') {
+  outputAllow('Cached: previously approved command');
+  process.exit(0);
+}
+
+// --- 5단계: Claude에게 판단 위임 (애매한 경우만) ---
 const userContext = getRecentUserMessages(input.transcript_path);
-debug(`Step 4 (LLM): transcript="${input.transcript_path}", userContext="${userContext?.slice(0, 100)}..."`);
+debug(`Step 5 (LLM): transcript="${input.transcript_path}", userContext="${userContext?.slice(0, 100)}..."`);
 const llmResult = askClaude(command, scriptPath, input.cwd, userContext);
-debug(`Step 4 result: ${llmResult}`);
+debug(`Step 5 result: ${llmResult}`);
 if (llmResult === 'approve') {
+  updateCache(input.session_id, command, 'approve');
   outputAllow('LLM analysis: approved (read-only or user-consented)');
   process.exit(0);
 }
