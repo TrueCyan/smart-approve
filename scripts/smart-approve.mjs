@@ -67,7 +67,8 @@ if (scriptPath) {
 }
 
 // --- 4단계: Claude에게 판단 위임 (애매한 경우만) ---
-const llmResult = askClaude(command, scriptPath, input.cwd);
+const userContext = getRecentUserMessages(input.transcript_path);
+const llmResult = askClaude(command, scriptPath, input.cwd, userContext);
 if (llmResult === 'readonly') {
   outputAllow('LLM analysis: predicted read-only');
   process.exit(0);
@@ -223,12 +224,53 @@ function resolveImport(dir, importPath) {
   return candidates.find(c => existsSync(c)) || null;
 }
 
-function askClaude(cmd, scriptFile, cwd) {
+function getRecentUserMessages(transcriptPath) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return '';
+
+  try {
+    const content = readFileSync(transcriptPath, 'utf8');
+    // JSONL: 파일 끝에서 최근 메시지를 추출
+    const lines = content.trim().split('\n');
+
+    // 최근 20줄만 확인 (성능)
+    const recentLines = lines.slice(-20);
+    const userMessages = [];
+
+    for (const line of recentLines) {
+      try {
+        const entry = JSON.parse(line);
+        // 유저 메시지 형식: role === 'human' 또는 type === 'human'
+        if (entry.role === 'user' || entry.role === 'human' || entry.type === 'human') {
+          const text = typeof entry.content === 'string'
+            ? entry.content
+            : Array.isArray(entry.content)
+              ? entry.content
+                  .filter(b => b.type === 'text')
+                  .map(b => b.text)
+                  .join(' ')
+              : '';
+          if (text.trim()) {
+            userMessages.push(text.trim());
+          }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+
+    // 최근 3개 유저 메시지만 반환
+    return userMessages.slice(-3).join('\n');
+  } catch {
+    return '';
+  }
+}
+
+function askClaude(cmd, scriptFile, cwd, userContext) {
   let prompt = `Analyze this bash command and classify it.
 
 READONLY means: the command only reads data, displays output, starts a dev server, runs tests, lints code, compiles/builds without deploying, or performs any action that does NOT permanently alter files on disk or make destructive external requests.
 
 MODIFYING means: the command creates/deletes/overwrites files, installs/removes packages, pushes to remote, deploys to production, or sends destructive HTTP requests (POST/PUT/DELETE).
+
+IMPORTANT: If the user explicitly requested this action in conversation, treat it as user-consented. A user-consented command should be classified as READONLY (the user already agreed to any side effects).
 
 Key examples:
 - "npm run dev" / "npm start" / "npm test" / "npm run build" → READONLY (dev server, test runner, build output is expected)
@@ -236,8 +278,13 @@ Key examples:
 - "rm -rf dist" / "git push" → MODIFYING
 - "node server.js" / "python app.py" → READONLY (just runs a process)
 - "curl -X POST ..." → MODIFYING
+- User said "start the server" + command is "npm run dev" → READONLY (user consented)
 
 Command: ${cmd}`;
+
+  if (userContext) {
+    prompt += `\n\nRecent user messages:\n${userContext}`;
+  }
 
   // 스크립트 파일이 있으면 내용도 첨부
   if (scriptFile) {
