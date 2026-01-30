@@ -19,7 +19,11 @@ export const READONLY_PATTERNS = [
   // Node.js / npm 읽기 전용
   /^(npm|yarn|pnpm)\s+(list|ls|info|view|outdated|audit|why|config\s+get|config\s+list)\b/,
   /^node\s+(-e|--eval)\s+/,
+  /^node\s+(-v|--version)\s*$/,
   /^npx\s+--yes\s+(which|envinfo)\b/,
+
+  // 버전 관리 도구 조회
+  /^(nvm|fnm|volta)\s+(list|ls|current|use|which|version)\b/,
 
   // Python 읽기 전용
   /^python3?\s+(-c|--version)\b/,
@@ -51,8 +55,8 @@ export const MODIFYING_PATTERNS = [
   /^(rm|del|rmdir|mkdir|mv|cp|move|copy|xcopy|robocopy|touch|chmod|chown|chgrp|ln)\b/,
   /^(rename|ren)\b/,
 
-  // 리다이렉션 (파일 쓰기)
-  /\s*>{1,2}\s*/,
+  // 리다이렉션 (파일 쓰기) — 2>/dev/null (stderr 억제)은 제외
+  /(?<![0-9])>{1,2}\s*(?!\/dev\/null)/,
 
   // 패키지 설치/제거
   /^(npm|yarn|pnpm)\s+(install|uninstall|add|remove|update|upgrade|link|publish|init)\b/,
@@ -121,7 +125,7 @@ export const SCRIPT_WRITE_PATTERNS = {
     /\bpathlib\.Path\([^)]*\)\.(write_text|write_bytes|mkdir|rmdir|unlink|rename|touch)\b/,
   ],
   sh: [
-    /\s*>{1,2}\s*/,
+    /(?<![0-9])>{1,2}\s*(?!\/dev\/null)/,
     /\b(rm|mv|cp|mkdir|touch|chmod|chown|sed\s+-i|dd)\b/,
     /\bcurl\b.*(-X\s*(POST|PUT|DELETE|PATCH)|-d\s|--data)/,
     /\bwget\b/,
