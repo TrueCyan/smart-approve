@@ -123,6 +123,43 @@ export const SCRIPT_WRITE_PATTERNS = {
   ],
 };
 
+// npm/yarn/pnpm run 명령에서 스크립트 이름 추출
+export function extractNpmScript(command) {
+  // npm run dev, npm run build, yarn dev, pnpm run start 등
+  const match = command.match(
+    /^(npm|yarn|pnpm)\s+(?:run\s+)?(\S+)/
+  );
+  if (!match) return null;
+
+  const [, manager, scriptName] = match;
+
+  // npm list, npm install 등은 npm 서브커맨드이지 스크립트가 아님
+  const builtinSubcommands = new Set([
+    'install', 'uninstall', 'add', 'remove', 'update', 'upgrade',
+    'list', 'ls', 'info', 'view', 'outdated', 'audit', 'why',
+    'init', 'publish', 'link', 'pack', 'cache', 'config',
+    'login', 'logout', 'whoami', 'token', 'access',
+    'help', 'version', '-v', '--version', '-h', '--help',
+    'ci', 'dedupe', 'prune', 'shrinkwrap', 'doctor',
+    'explore', 'fund', 'search', 'star', 'stars',
+    'prefix', 'root', 'bin', 'bugs', 'docs', 'repo',
+    'set-script', 'exec', 'pkg', 'explain',
+    'run-script', // 이건 별도 처리
+  ]);
+
+  // "npm run xxx"이면 항상 스크립트
+  if (command.match(/^(npm|yarn|pnpm)\s+run\s+/)) {
+    return scriptName;
+  }
+
+  // "npm xxx"이면 빌트인 커맨드가 아닐 때만 스크립트
+  if (!builtinSubcommands.has(scriptName)) {
+    return scriptName;
+  }
+
+  return null;
+}
+
 // 파일 확장자 → 언어 매핑
 export function getLanguage(filePath) {
   const ext = filePath.split('.').pop()?.toLowerCase();

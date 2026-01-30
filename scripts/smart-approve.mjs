@@ -6,6 +6,7 @@ import {
   MODIFYING_PATTERNS,
   SCRIPT_WRITE_PATTERNS,
   extractScriptPath,
+  extractNpmScript,
   getLanguage,
 } from './patterns.mjs';
 
@@ -38,7 +39,21 @@ if (ruleResult === 'modifying') {
   process.exit(0);
 }
 
-// --- 2단계: 스크립트 내용 정적 분석 ---
+// --- 2단계: npm/yarn/pnpm scripts 분석 ---
+const npmScript = extractNpmScript(command);
+if (npmScript) {
+  const npmResult = analyzeNpmScript(npmScript, input.cwd);
+  if (npmResult === 'readonly') {
+    outputAllow(`npm script analysis: "${npmScript}" resolved to read-only command`);
+    process.exit(0);
+  }
+  if (npmResult === 'modifying') {
+    process.exit(0);
+  }
+  // ambiguous → 3단계로 계속
+}
+
+// --- 3단계: 스크립트 파일 내용 정적 분석 ---
 const scriptPath = extractScriptPath(command);
 if (scriptPath) {
   const staticResult = analyzeScriptContent(scriptPath, input.cwd);
@@ -51,7 +66,7 @@ if (scriptPath) {
   }
 }
 
-// --- 3단계: Claude에게 판단 위임 (애매한 경우만) ---
+// --- 4단계: Claude에게 판단 위임 (애매한 경우만) ---
 const llmResult = askClaude(command, scriptPath, input.cwd);
 if (llmResult === 'readonly') {
   outputAllow('LLM analysis: predicted read-only');
@@ -64,6 +79,38 @@ process.exit(0);
 // ============================================================
 // 함수 정의
 // ============================================================
+
+function analyzeNpmScript(scriptName, cwd) {
+  // package.json을 찾아서 scripts 필드에서 실제 명령어를 읽어온다
+  const pkgPath = findPackageJson(cwd);
+  if (!pkgPath) return 'ambiguous';
+
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  } catch {
+    return 'ambiguous';
+  }
+
+  const actualCommand = pkg.scripts?.[scriptName];
+  if (!actualCommand) return 'ambiguous';
+
+  // 실제 명령어를 규칙 기반으로 분석
+  return analyzeByRules(actualCommand);
+}
+
+function findPackageJson(startDir) {
+  if (!startDir) return null;
+  let dir = startDir;
+  for (let i = 0; i < 10; i++) {
+    const candidate = resolve(dir, 'package.json');
+    if (existsSync(candidate)) return candidate;
+    const parent = resolve(dir, '..');
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
 
 function analyzeByRules(cmd) {
   // 파이프/체인 명령은 개별 명령 모두 확인
@@ -177,7 +224,18 @@ function resolveImport(dir, importPath) {
 }
 
 function askClaude(cmd, scriptFile, cwd) {
-  let prompt = `Analyze this bash command and determine if it modifies the filesystem, system state, or makes destructive network requests.
+  let prompt = `Analyze this bash command and classify it.
+
+READONLY means: the command only reads data, displays output, starts a dev server, runs tests, lints code, compiles/builds without deploying, or performs any action that does NOT permanently alter files on disk or make destructive external requests.
+
+MODIFYING means: the command creates/deletes/overwrites files, installs/removes packages, pushes to remote, deploys to production, or sends destructive HTTP requests (POST/PUT/DELETE).
+
+Key examples:
+- "npm run dev" / "npm start" / "npm test" / "npm run build" → READONLY (dev server, test runner, build output is expected)
+- "npm install" / "pip install" → MODIFYING (alters node_modules/venv)
+- "rm -rf dist" / "git push" → MODIFYING
+- "node server.js" / "python app.py" → READONLY (just runs a process)
+- "curl -X POST ..." → MODIFYING
 
 Command: ${cmd}`;
 
