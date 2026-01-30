@@ -112,7 +112,28 @@ if (ruleResult === 'readonly') {
   process.exit(0);
 }
 
+// modifying이면 캐시/LLM 유저 의도 확인으로 넘김 (유저가 요청했을 수 있음)
+// readonly도 ambiguous도 아닌 경우 → 2~3단계 스킵하고 4단계(캐시/LLM)로 직행
 if (ruleResult === 'modifying') {
+  debug('Step 1: modifying detected, checking user intent...');
+  // 캐시 확인
+  const cached = checkCache(input.session_id, command);
+  debug(`Step 1→cache: ${cached ?? 'miss'}`);
+  if (cached === 'approve') {
+    outputAllow('Cached: previously approved command');
+    process.exit(0);
+  }
+  // LLM 유저 의도 확인
+  const userContext = getRecentUserMessages(input.transcript_path);
+  debug(`Step 1→LLM: userContext="${userContext?.slice(0, 100)}..."`);
+  const llmResult = askClaude(command, null, input.cwd, userContext);
+  debug(`Step 1→LLM result: ${llmResult}`);
+  if (llmResult === 'approve') {
+    updateCache(input.session_id, command, 'approve');
+    outputAllow('LLM: user-consented modifying command');
+    process.exit(0);
+  }
+  // LLM도 approve 안 함 → 기본 플로우 (사용자 확인)
   process.exit(0);
 }
 
