@@ -9,6 +9,7 @@ import {
   extractScriptPath,
   extractNpmScript,
   getLanguage,
+  splitShellCommand,
 } from './patterns.mjs';
 
 // --- 디버그 로깅 (항상 켜짐, SMART_APPROVE_DEBUG=0 으로 끌 수 있음) ---
@@ -437,9 +438,8 @@ function analyzeByRules(cmd) {
   // powershell -Command "..." 래핑 해제
   cmd = unwrapPowershell(cmd);
 
-  // 파이프/체인 명령은 개별 명령 모두 확인
-  // ||와 &&를 먼저 매칭하여 개별 |/&로 분할되지 않도록 함
-  const subCommands = cmd.split(/\s*(?:\|\||&&|[;|])\s*/).map(s => s.trim()).filter(Boolean);
+  // 따옴표/서브셸을 인식하는 분할 (따옴표 안의 ;|는 분할하지 않음)
+  const subCommands = splitShellCommand(cmd);
 
   let hasModifying = false;
   for (const sub of subCommands) {
@@ -608,21 +608,30 @@ A command is DENY (requires manual confirmation) if ALL of the following are tru
 1. It has side effects (writes files, installs packages, starts processes, modifies system state, makes network requests)
 2. The user did NOT explicitly request this action
 
-## Key Principle
+## Key Principles
 - "Side effects" includes: starting servers/processes, writing files, installing packages, deploying, network mutations
 - Starting a dev server IS a side effect — but if the user said "start the server", they already consented
 - Claude autonomously deciding to run a modifying command without the user asking → DENY
 - Claude running exactly what the user asked for → APPROVE
+- **Compound commands**: If ALL parts of a compound command (&&, ||, ;, |) are read-only, the whole command is read-only
+- **Inline scripts**: \`python3 -c "..."\`, \`node -e "..."\`, \`sh -c "..."\` — judge by what the script actually does, not just the wrapper
+- **docker compose exec/docker exec running read-only commands** (ls, cat, echo, env, which, etc.) inside a container is effectively read-only
+- **Redirections**: \`2>/dev/null\`, \`2>&1\` are stderr suppression, NOT file writes
 
 ## Examples
 - Command: "ls -la" → APPROVE (read-only)
 - Command: "git status" → APPROVE (read-only)
+- Command: "cat file.json | python3 -c 'import json,sys; print(json.load(sys.stdin))'" → APPROVE (read-only: cat pipes to python which only prints)
+- Command: "docker compose exec backend sh -c 'ls -la; echo done'" → APPROVE (read-only commands inside container)
+- Command: "readlink -f $(which node)" → APPROVE (read-only)
+- Command: "gh auth status 2>&1" → APPROVE (read-only)
 - Command: "npm run dev", user said: "서버 켜줘" → APPROVE (user consented)
 - Command: "npm run dev", user said: "코드 리뷰해줘" → DENY (user didn't ask to start server)
 - Command: "npm install express", user said: "express 설치해줘" → APPROVE (user consented)
 - Command: "npm install lodash", user said: "코드 최적화해줘" → DENY (user didn't ask to install)
 - Command: "rm -rf node_modules", user said: "node_modules 지워줘" → APPROVE (user consented)
 - Command: "rm -rf dist" (no user request) → DENY
+- Command: "docker compose up -d" (no user request) → DENY
 
 Command: ${cmd}`;
 

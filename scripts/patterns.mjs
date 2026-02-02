@@ -1,8 +1,101 @@
+// 셸 따옴표/서브셸을 인식하는 명령어 분할
+export function splitShellCommand(cmd) {
+  const parts = [];
+  let current = '';
+  let i = 0;
+
+  while (i < cmd.length) {
+    const ch = cmd[i];
+
+    // 작은따옴표 — 내부 전부 리터럴
+    if (ch === "'") {
+      const end = cmd.indexOf("'", i + 1);
+      if (end === -1) { current += cmd.slice(i); break; }
+      current += cmd.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+
+    // 큰따옴표 — 이스케이프 처리
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < cmd.length) {
+        if (cmd[j] === '\\') { j += 2; continue; }
+        if (cmd[j] === '"') break;
+        j++;
+      }
+      current += cmd.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+
+    // 백틱
+    if (ch === '`') {
+      const end = cmd.indexOf('`', i + 1);
+      if (end === -1) { current += cmd.slice(i); break; }
+      current += cmd.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+
+    // $(...) 서브셸
+    if (ch === '$' && i + 1 < cmd.length && cmd[i + 1] === '(') {
+      let depth = 1;
+      let j = i + 2;
+      while (j < cmd.length && depth > 0) {
+        if (cmd[j] === '(') depth++;
+        else if (cmd[j] === ')') depth--;
+        else if (cmd[j] === "'") {
+          const end = cmd.indexOf("'", j + 1);
+          if (end !== -1) j = end;
+        } else if (cmd[j] === '"') {
+          let k = j + 1;
+          while (k < cmd.length) {
+            if (cmd[k] === '\\') { k += 2; continue; }
+            if (cmd[k] === '"') break;
+            k++;
+          }
+          j = k;
+        }
+        j++;
+      }
+      current += cmd.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // 연산자: ||, &&
+    if (i + 1 < cmd.length && (cmd.slice(i, i + 2) === '||' || cmd.slice(i, i + 2) === '&&')) {
+      if (current.trim()) parts.push(current.trim());
+      current = '';
+      i += 2;
+      while (i < cmd.length && cmd[i] === ' ') i++;
+      continue;
+    }
+
+    // 연산자: ;, |
+    if (ch === ';' || ch === '|') {
+      if (current.trim()) parts.push(current.trim());
+      current = '';
+      i++;
+      while (i < cmd.length && cmd[i] === ' ') i++;
+      continue;
+    }
+
+    current += ch;
+    i++;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
 // 명확히 읽기 전용인 CLI 명령어 패턴
 export const READONLY_PATTERNS = [
   // 파일/디렉토리 조회
   /^(ls|dir|tree|find|where|which|file|stat|wc|du|df)\b/,
   /^(cat|type|head|tail|less|more|bat)\b/,
+  /^(readlink|realpath|basename|dirname)\b/,
 
   // 디렉토리 이동
   /^cd\b/,
@@ -10,8 +103,23 @@ export const READONLY_PATTERNS = [
   // 시스템 정보 / 대기
   /^(echo|printf|pwd|whoami|hostname|uname|date|uptime|env|set|printenv|sleep)\b/,
 
-  // 셸 환경 로드
+  // 사용자/그룹 정보
+  /^(id|groups|getent)\b/,
+
+  // 셸 내장 / 테스트
   /^(source|\.)\s/,
+  /^(test|true|false|\[)\b/,
+  /^(command\s+-v|type\s)\b/,
+
+  // 해시/체크섬
+  /^(md5sum|sha256sum|sha1sum|shasum|cksum|b2sum)\b/,
+
+  // 텍스트 처리 (읽기 전용)
+  /^(sort|uniq|cut|tr|rev|tac|nl|column|paste|join|comm|fold|fmt|expand|unexpand)\b/,
+  /^(awk|gawk)\b(?!.*\s-i)/,
+  /^(jq|yq|xq)\b/,
+  /^(diff|cmp)\b/,
+  /^(xxd|od|hexdump|strings)\b/,
 
   // Git 읽기 전용
   /^git\s+(status|log|diff|show|branch|tag|remote|stash\s+list|describe|rev-parse|config\s+--get|config\s+-l|shortlog|blame|reflog)\b/,
@@ -53,6 +161,10 @@ export const READONLY_PATTERNS = [
 
   // Docker 읽기 전용
   /^docker\s+(ps|images|logs|inspect|stats|version|info)\b/,
+  /^docker\s+compose\s+(ps|logs|config|images|ls|top|events|port|version)\b/,
+
+  // GitHub CLI 읽기 전용
+  /^gh\s+(auth\s+status|pr\s+(view|list|status|checks|diff)|issue\s+(view|list|status)|repo\s+(view|list)|api\s)/,
 
   // Perforce 읽기 전용
   /^p4\s+(info|status|changes|filelog|print|diff|describe|clients|users|branches|labels|have|where|fstat|opened)\b/,
@@ -85,8 +197,10 @@ export const MODIFYING_PATTERNS = [
   /^(kill|killall|pkill|shutdown|reboot|service|systemctl)\b/,
   /^(sed\s+-i|awk\s+-i)\b/,
 
-  // Docker 수정
-  /^docker\s+(run|exec|build|push|pull|rm|rmi|stop|start|restart|compose)\b/,
+  // Docker 수정 (개별 컨테이너)
+  /^docker\s+(run|exec|build|push|pull|rm|rmi|stop|start|restart)\b/,
+  // Docker compose 수정
+  /^docker\s+compose\s+(up|down|build|create|start|stop|restart|rm|pull|push|run|exec)\b/,
 
   // Perforce 수정
   /^p4\s+(submit|revert|edit|add|delete|shelve|unshelve|resolve|sync)\b/,
