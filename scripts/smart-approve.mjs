@@ -69,9 +69,9 @@ const BATCH_TTL_MS = 10 * 60 * 1000; // 10분
 
 const APPROVAL_KEYWORDS = [
   // 한국어
-  /진행/, /승인/, /실행/, /계속/, /해줘/, /ㅇㅇ/, /^응$/, /^네$/,
+  /진행/, /승인/, /실행/, /계속/, /해줘/, /ㅇㅇ/, /^응$/, /^네$/, /^그래$/, /좋아/, /^ㅇㅋ$/, /^오케이$/,
   // 영어
-  /proceed/i, /approve/i, /go\s*ahead/i, /^yes$/i, /continue/i, /^ok$/i,
+  /proceed/i, /approve/i, /go\s*ahead/i, /^yes$/i, /continue/i, /^ok$/i, /^sure$/i, /^yep$/i,
 ];
 
 function loadBatch() {
@@ -556,26 +556,25 @@ function getRecentUserMessages(transcriptPath) {
     // JSONL: 파일 끝에서 최근 메시지를 추출
     const lines = content.trim().split('\n');
 
-    // 최근 20줄만 확인 (성능)
-    const recentLines = lines.slice(-20);
-    const userMessages = [];
+    // 최근 30줄만 확인 (성능)
+    const recentLines = lines.slice(-30);
+    const conversation = [];
 
     for (const line of recentLines) {
       try {
         const entry = JSON.parse(line);
-        // transcript 형식: entry.type === 'user', 텍스트는 entry.message.content
-        if (entry.type !== 'user') continue;
+        if (entry.type !== 'user' && entry.type !== 'assistant') continue;
 
-        const content = entry.message?.content ?? entry.content;
+        const msgContent = entry.message?.content ?? entry.content;
         let text = '';
 
-        if (typeof content === 'string') {
+        if (typeof msgContent === 'string') {
           // XML 태그로 시작하면 시스템/커맨드 메시지이므로 스킵
-          if (content.startsWith('<')) continue;
-          text = content;
-        } else if (Array.isArray(content)) {
-          // [{type: 'text', text: '...'}, ...] 형식
-          text = content
+          if (msgContent.startsWith('<')) continue;
+          text = msgContent;
+        } else if (Array.isArray(msgContent)) {
+          // [{type: 'text', text: '...'}, ...] 형식에서 텍스트만 추출
+          text = msgContent
             .filter(b => b.type === 'text')
             .map(b => b.text)
             .filter(t => !t.startsWith('<'))
@@ -583,13 +582,14 @@ function getRecentUserMessages(transcriptPath) {
         }
 
         if (text.trim()) {
-          userMessages.push(text.trim());
+          const role = entry.type === 'user' ? 'User' : 'Assistant';
+          conversation.push(`${role}: ${text.trim()}`);
         }
       } catch { /* skip malformed lines */ }
     }
 
-    // 최근 3개 유저 메시지만 반환
-    return userMessages.slice(-3).join('\n');
+    // 최근 6개 메시지(user+assistant)만 반환하여 대화 맥락 유지
+    return conversation.slice(-6).join('\n');
   } catch {
     return '';
   }
@@ -736,10 +736,9 @@ function handleBatchApproval(command, input) {
     return;
   }
 
-  // 요약 메시지 생성
-  const summary = '다음 변경사항을 실행하려 합니다:\n' +
-    modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n') +
-    '\n계속 진행하려면 "진행해줘"라고 말씀해 주세요.';
+  // 요약 메시지 생성 (에이전트가 보고 사용자에게 권한 요청하도록 지시)
+  const summary = '다음 명령어들은 시스템을 변경하는 작업이므로 사용자의 명시적 승인이 필요합니다. 사용자에게 아래 명령어 목록을 설명하고 진행 여부를 확인받으세요:\n' +
+    modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n');
 
   // 배치 저장
   const newBatch = {
