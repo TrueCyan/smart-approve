@@ -7,8 +7,8 @@ export const READONLY_PATTERNS = [
   // 디렉토리 이동
   /^cd\b/,
 
-  // 시스템 정보
-  /^(echo|printf|pwd|whoami|hostname|uname|date|uptime|env|set|printenv)\b/,
+  // 시스템 정보 / 대기
+  /^(echo|printf|pwd|whoami|hostname|uname|date|uptime|env|set|printenv|sleep)\b/,
 
   // 셸 환경 로드
   /^(source|\.)\s/,
