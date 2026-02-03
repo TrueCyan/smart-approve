@@ -730,23 +730,19 @@ function handleBatchApproval(command, input) {
   const plannedCommands = extractPlannedCommands(input.transcript_path);
   debug(`Batch: extracted ${plannedCommands.length} planned commands`);
 
-  if (plannedCommands.length === 0) {
-    // 계획된 명령어가 없으면 배치 생성 불가 → 기본 플로우
-    return;
-  }
-
   // modifying 명령어만 필터링
-  const modifyingCommands = plannedCommands.filter(cmd => {
+  let modifyingCommands = plannedCommands.filter(cmd => {
     const result = analyzeByRules(cmd);
     return result === 'modifying' || result === 'ambiguous';
   });
 
+  // 계획된 명령이 없거나 필터링 결과가 비어있으면 현재 명령만으로 배치 생성
   if (modifyingCommands.length === 0) {
-    return;
+    modifyingCommands = [command];
   }
 
   // 요약 메시지 생성 (에이전트가 보고 사용자에게 권한 요청하도록 지시)
-  const summary = '다음 명령어들은 시스템을 변경하는 작업이므로 사용자의 명시적 승인이 필요합니다. 사용자에게 아래 명령어 목록을 설명하고 진행 여부를 확인받으세요:\n' +
+  const summary = '다음 명령어는 시스템을 변경할 수 있는 작업입니다. 사용자에게 설명하고 승인을 받으세요:\n' +
     modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n');
 
   // 배치 저장
