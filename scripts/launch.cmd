@@ -3,8 +3,8 @@ setlocal
 
 set "SCRIPT=%~dp0smart-approve.mjs"
 
-:: 1. node in PATH
-where node >nul 2>nul
+:: 1. node in PATH (verify it actually executes, not just exists)
+node --version >nul 2>nul
 if %errorlevel%==0 (
     node "%SCRIPT%"
     exit /b %errorlevel%

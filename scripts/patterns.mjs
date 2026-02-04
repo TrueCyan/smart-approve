@@ -161,6 +161,8 @@ export const READONLY_PATTERNS = [
 
   // Docker 읽기 전용
   /^docker\s+(ps|images|logs|inspect|stats|version|info)\b/,
+  /^docker\s+(volume|network|system|image|container)\s+(ls|list|inspect)\b/,
+  /^docker\s+system\s+(df|info)\b/,
   /^docker\s+compose\s+(ps|logs|config|images|ls|top|events|port|version)\b/,
 
   // GitHub CLI 읽기 전용
@@ -199,6 +201,10 @@ export const MODIFYING_PATTERNS = [
 
   // Docker 수정 (개별 컨테이너)
   /^docker\s+(run|exec|build|push|pull|rm|rmi|stop|start|restart)\b/,
+  // Docker 리소스 수정 (volume, network, system, image)
+  /^docker\s+(volume|network)\s+(rm|create|prune)\b/,
+  /^docker\s+network\s+(connect|disconnect)\b/,
+  /^docker\s+(system|image|container|builder)\s+prune\b/,
   // Docker compose 수정
   /^docker\s+compose\s+(up|down|build|create|start|stop|restart|rm|pull|push|run|exec)\b/,
 

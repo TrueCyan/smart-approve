@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/smart-approve.mjs\" || sh \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh\" || cmd /c \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.cmd\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/smart-approve.mjs\" || cmd /c \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.cmd\" || sh \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh\"",
             "timeout": 20000
           }
         ]
