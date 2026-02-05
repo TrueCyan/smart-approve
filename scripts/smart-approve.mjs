@@ -720,9 +720,17 @@ function handleBatchApproval(command, input) {
           return;
         }
       }
-      // pending 상태, 이미 deny 보냄 → exit(0)으로 기본 플로우
-      debug('Batch: already pending, waiting for user approval');
-      return;
+      // pending 배치가 있지만 현재 명령이 포함되지 않음 → 새 배치로 교체
+      if (!batch.commands.includes(command)) {
+        debug('Batch: command not in pending batch, creating new batch');
+        clearBatch();
+        // 아래 "새로운 배치 생성" 로직으로 진행
+      } else {
+        // 현재 명령이 배치에 있지만 아직 승인 안 됨 → 다시 deny
+        debug('Batch: command in pending batch, re-denying');
+        outputDeny(batch.summary);
+        return;
+      }
     }
   }
 
