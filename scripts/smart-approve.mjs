@@ -624,6 +624,12 @@ A command is DENY (requires manual confirmation) if ALL of the following are tru
 - **Redirections**: \`2>/dev/null\`, \`2>&1\` are stderr suppression, NOT file writes
 - **Database operations**: SELECT/find/query = read-only. INSERT/UPDATE/DELETE/DROP = modifying
 
+## User Intent Recognition
+- "User:" messages are the source of truth for user consent
+- "Assistant:" messages show Claude's plans and interpretations
+- Look for explicit approval in User messages (e.g., "해줘", "진행", "yes", "커밋해", "푸시해")
+- When Assistant says "user asked for X", confirm with an actual User message requesting X
+
 ## Examples
 - Command: "ls -la" → APPROVE (read-only)
 - Command: "git status" → APPROVE (read-only)
