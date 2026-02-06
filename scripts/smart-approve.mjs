@@ -147,8 +147,8 @@ function checkUserApproval(transcriptPath) {
     const content = readFileSync(transcriptPath, 'utf8');
     const lines = content.trim().split('\n');
 
-    // 최근 5줄에서 user 메시지 확인
-    const recentLines = lines.slice(-5);
+    // 최근 10줄에서 user 메시지 확인
+    const recentLines = lines.slice(-10);
     for (let i = recentLines.length - 1; i >= 0; i--) {
       try {
         const entry = JSON.parse(recentLines[i]);
@@ -161,11 +161,16 @@ function checkUserApproval(transcriptPath) {
           if (msgContent.startsWith('<')) continue;
           text = msgContent;
         } else if (Array.isArray(msgContent)) {
-          text = msgContent
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
-            .filter(t => !t.startsWith('<'))
-            .join(' ');
+          // tool_result 블록도 확인 (AskUserQuestion 응답)
+          for (const block of msgContent) {
+            if (block.type === 'text' && block.text && !block.text.startsWith('<')) {
+              text += ' ' + block.text;
+            }
+            if (block.type === 'tool_result' && typeof block.content === 'string') {
+              // "User has answered your questions: \"...\"=\"진행\"" 형식
+              text += ' ' + block.content;
+            }
+          }
         }
 
         text = text.trim();

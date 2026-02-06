@@ -1,7 +1,7 @@
 {
   "name": "smart-approve",
   "description": "Smart Bash command auto-approval - rule-based analysis + LLM with user intent awareness",
-  "version": "1.10.6",
+  "version": "1.10.7",
   "author": {
     "name": "TrueCyan"
   },
