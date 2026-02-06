@@ -77,8 +77,26 @@ Bash 명령어 요청
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 18+ (must be in PATH)
 - Claude Code CLI (`claude` command available in PATH)
+
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| macOS    | ✅ Fully supported |
+| Linux    | ✅ Fully supported |
+| WSL      | ✅ Fully supported |
+| Windows  | ⚠️ Limited - see below |
+
+### Windows Limitations
+
+Claude Code executes hook commands via `sh -c "..."` internally. On native Windows (not WSL), `sh` does not exist, so the hook fails to execute. The plugin will silently fall back to Claude Code's default permission flow.
+
+**Workarounds:**
+1. Use WSL (recommended) - Full support
+2. Install Git Bash and add `sh` to PATH
+3. Use Claude Code's built-in permission system instead
 
 ## License
 
