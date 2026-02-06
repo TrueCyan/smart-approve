@@ -200,7 +200,7 @@ export const MODIFYING_PATTERNS = [
   /^(sed\s+-i|awk\s+-i)\b/,
 
   // Docker 수정 (개별 컨테이너)
-  /^docker\s+(run|exec|build|push|pull|rm|rmi|stop|start|restart)\b/,
+  /^docker\s+(run|exec|build|push|pull|rm|rmi|stop|start|restart|cp)\b/,
   // Docker 리소스 수정 (volume, network, system, image)
   /^docker\s+(volume|network)\s+(rm|create|prune)\b/,
   /^docker\s+network\s+(connect|disconnect)\b/,

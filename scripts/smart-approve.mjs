@@ -606,28 +606,31 @@ function askClaude(cmd, scriptFile, cwd, userContext) {
 ## Classification Rules
 
 A command is APPROVE if ANY of the following is true:
-1. It is purely read-only (reads data, displays output, searches, prints info)
+1. It is purely read-only (reads data, displays output, searches, prints info, queries databases with SELECT)
 2. The user EXPLICITLY requested this exact action in their recent messages
 
 A command is DENY (requires manual confirmation) if ALL of the following are true:
-1. It has side effects (writes files, installs packages, starts processes, modifies system state, makes network requests)
+1. It has side effects (writes files, installs packages, starts processes, modifies system state, makes network requests that mutate data)
 2. The user did NOT explicitly request this action
 
 ## Key Principles
-- "Side effects" includes: starting servers/processes, writing files, installing packages, deploying, network mutations
+- "Side effects" includes: starting servers/processes, writing files, installing packages, deploying, network mutations (POST/PUT/DELETE)
 - Starting a dev server IS a side effect — but if the user said "start the server", they already consented
 - Claude autonomously deciding to run a modifying command without the user asking → DENY
 - Claude running exactly what the user asked for → APPROVE
 - **Compound commands**: If ALL parts of a compound command (&&, ||, ;, |) are read-only, the whole command is read-only
 - **Inline scripts**: \`python3 -c "..."\`, \`node -e "..."\`, \`sh -c "..."\` — judge by what the script actually does, not just the wrapper
-- **docker compose exec/docker exec running read-only commands** (ls, cat, echo, env, which, etc.) inside a container is effectively read-only
+- **docker exec/docker compose exec**: Look at what runs INSIDE the container. If it only reads (ls, cat, SELECT queries, console.log), it's read-only
 - **Redirections**: \`2>/dev/null\`, \`2>&1\` are stderr suppression, NOT file writes
+- **Database operations**: SELECT/find/query = read-only. INSERT/UPDATE/DELETE/DROP = modifying
 
 ## Examples
 - Command: "ls -la" → APPROVE (read-only)
 - Command: "git status" → APPROVE (read-only)
 - Command: "cat file.json | python3 -c 'import json,sys; print(json.load(sys.stdin))'" → APPROVE (read-only: cat pipes to python which only prints)
 - Command: "docker compose exec backend sh -c 'ls -la; echo done'" → APPROVE (read-only commands inside container)
+- Command: "docker exec backend node -e 'db.query(\"SELECT * FROM users\")'" → APPROVE (read-only DB query)
+- Command: "docker exec backend node script.js" where script does console.log(db.all()) → APPROVE (read-only)
 - Command: "readlink -f $(which node)" → APPROVE (read-only)
 - Command: "gh auth status 2>&1" → APPROVE (read-only)
 - Command: "npm run dev", user said: "서버 켜줘" → APPROVE (user consented)
@@ -637,6 +640,7 @@ A command is DENY (requires manual confirmation) if ALL of the following are tru
 - Command: "rm -rf node_modules", user said: "node_modules 지워줘" → APPROVE (user consented)
 - Command: "rm -rf dist" (no user request) → DENY
 - Command: "docker compose up -d" (no user request) → DENY
+- Command: "docker cp file.js container:/tmp/" (no user request) → DENY (copies file to container)
 
 Command: ${cmd}`;
 
@@ -667,7 +671,7 @@ Command: ${cmd}`;
   try {
     // stdin으로 프롬프트 전달 (이스케이핑 문제 방지)
     const result = execSync(
-      `claude -p --model haiku --max-turns 1 --no-session-persistence`,
+      `claude -p --model sonnet --max-turns 1 --no-session-persistence`,
       {
         input: prompt,
         timeout: 15000,
