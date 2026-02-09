@@ -695,6 +695,12 @@ Command: ${cmd}`;
     return 'ambiguous';
   } catch (err) {
     debug(`LLM error: ${err.message}`);
+    if (err.stderr) {
+      debug(`LLM stderr: ${err.stderr.toString().slice(0, 500)}`);
+    }
+    if (err.stdout) {
+      debug(`LLM stdout: ${err.stdout.toString().slice(0, 500)}`);
+    }
     return 'ambiguous';
   } finally {
     releaseLock();
