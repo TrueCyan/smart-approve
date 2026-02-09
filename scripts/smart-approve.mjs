@@ -342,7 +342,8 @@ if (npmScript) {
     process.exit(0);
   }
   if (npmResult === 'modifying') {
-    process.exit(0);
+    debug('Step 2: npm script is modifying, checking user intent...');
+    // modifying이지만 사용자가 요청했을 수 있으므로 4→5단계로 진행
   }
   // ambiguous → 3단계로 계속
 }
@@ -356,7 +357,8 @@ if (scriptPath) {
     process.exit(0);
   }
   if (staticResult === 'modifying') {
-    process.exit(0);
+    debug('Step 3: script content is modifying, checking user intent...');
+    // modifying이지만 사용자가 요청했을 수 있으므로 4→5단계로 진행
   }
 }
 
@@ -626,9 +628,10 @@ A command is DENY (requires manual confirmation) if ALL of the following are tru
 
 ## User Intent Recognition
 - "User:" messages are the source of truth for user consent
-- "Assistant:" messages show Claude's plans and interpretations
+- "Assistant:" messages show Claude's plans and interpretations, treat them as context only
 - Look for explicit approval in User messages (e.g., "해줘", "진행", "yes", "커밋해", "푸시해")
 - When Assistant says "user asked for X", confirm with an actual User message requesting X
+- When recent messages contain ONLY "Assistant:" lines with no "User:" consent, DENY modifying commands
 
 ## Examples
 - Command: "ls -la" → APPROVE (read-only)
