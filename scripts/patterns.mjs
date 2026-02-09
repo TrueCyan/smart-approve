@@ -143,6 +143,18 @@ export const READONLY_PATTERNS = [
   // .NET 읽기 전용
   /^dotnet\s+(--list-sdks|--list-runtimes|--info|--version|nuget\s+list)\b/,
 
+  // TypeScript / 빌드 도구 타입 체크 (--noEmit, --dry-run 등)
+  /^(tsc|npx\s+tsc|.*\/tsc)\b.*--noEmit/,
+  /^(vite|npx\s+vite|webpack|esbuild|rollup)\b.*--dry-run/,
+
+  // 빌드 도구 일반 실행 (파일 생성하지만 일반적으로 허용)
+  /^(tsc|npx\s+tsc|.*\/tsc)\b/,
+  /^(vite|npx\s+vite)\s+(build|preview)\b/,
+  /^(webpack|npx\s+webpack)\b/,
+  /^(esbuild|npx\s+esbuild)\b/,
+  /^(rollup|npx\s+rollup)\b/,
+  /^(parcel|npx\s+parcel)\s+build\b/,
+
   // sed 읽기 전용 (sed -i 제외)
   /^sed\b(?!.*\s-i)/,
 
