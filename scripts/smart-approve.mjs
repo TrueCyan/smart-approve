@@ -1,16 +1,18 @@
 import { readFileSync, existsSync, appendFileSync, writeFileSync, unlinkSync } from 'fs';
-import { execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync, spawn } from 'child_process';
 import { resolve, isAbsolute, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import {
-  READONLY_PATTERNS,
-  MODIFYING_PATTERNS,
   SCRIPT_WRITE_PATTERNS,
   extractScriptPath,
   extractNpmScript,
   getLanguage,
   splitShellCommand,
 } from './patterns.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // --- 디버그 로깅 (항상 켜짐, SMART_APPROVE_DEBUG=0 으로 끌 수 있음) ---
 const DEBUG = process.env.SMART_APPROVE_DEBUG !== '0';
@@ -62,6 +64,135 @@ function releaseLock() {
       unlinkSync(LOCK_PATH);
     }
   } catch { /* ignore */ }
+}
+
+// --- 읽기전용 캐시 (동적 학습) ---
+const READONLY_CACHE_PATH = resolve(homedir(), '.claude', 'smart-approve-readonly-cache.json');
+
+function loadReadonlyCache() {
+  try {
+    if (!existsSync(READONLY_CACHE_PATH)) return { commands: {} };
+    return JSON.parse(readFileSync(READONLY_CACHE_PATH, 'utf8'));
+  } catch { return { commands: {} }; }
+}
+
+function saveReadonlyCache(cache) {
+  try {
+    writeFileSync(READONLY_CACHE_PATH, JSON.stringify(cache, null, 2));
+  } catch { /* ignore */ }
+}
+
+// 명령어 정규화: base command + subcommands + flags (경로/파일 인자 제외)
+function normalizeCommand(cmd) {
+  const parts = cmd.trim().split(/\s+/);
+  const base = parts[0];
+  const rest = parts.slice(1);
+  const flags = rest.filter(p => p.startsWith('-')).sort();
+  const subcommands = rest.filter(p => !p.startsWith('-') && !p.includes('/') && !p.includes('.'));
+  return [base, ...subcommands, ...flags].join(' ').trim();
+}
+
+// 비동기 LLM readonly 판단 (detached child process)
+function spawnAsyncLlmCheck(command) {
+  const script = resolve(__dirname, 'async-readonly-check.mjs');
+  try {
+    const child = spawn('node', [script, command], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, SMART_APPROVE_DEBUG: DEBUG ? '1' : '0' },
+    });
+    child.unref();
+    debug(`[async] Spawned LLM check for: "${command}"`);
+  } catch (err) {
+    debug(`[async] Failed to spawn LLM check: ${err.message}`);
+  }
+}
+
+// 합성 명령어를 분해하여 캐시 기반으로 분류
+// 반환: { result: 'readonly' | 'unknown', unknownParts: string[] }
+function classifyCommand(command) {
+  const cache = loadReadonlyCache();
+
+  // 합성 명령어 분해
+  const parts = splitShellCommand(command);
+  const unknownParts = [];
+
+  for (const part of parts) {
+    const normalized = normalizeCommand(part);
+    const cached = cache.commands[normalized];
+
+    if (cached?.type === 'readonly') {
+      // readonly 캐시 히트 → OK
+      debug(`[classify] readonly (cached): "${normalized}"`);
+    } else {
+      // 캐시에 없음 → unknown
+      debug(`[classify] unknown: "${normalized}"`);
+      unknownParts.push(part);
+    }
+  }
+
+  if (unknownParts.length === 0) {
+    debug(`[classify] 모두 readonly: "${command}"`);
+    return { result: 'readonly', unknownParts: [] };
+  }
+
+  debug(`[classify] unknown 포함 (${unknownParts.length}개): ${unknownParts.join(', ')}`);
+  return { result: 'unknown', unknownParts };
+}
+
+// 사용자가 "항상 허용"을 입력했는지 확인
+const ALWAYS_ALLOW_KEYWORDS = [
+  /항상\s*허용/, /always\s*allow/i,
+];
+
+// 훅 자신의 deny 메시지인지 확인 (self-approval 방지)
+const DENY_MESSAGE_PATTERNS = [
+  /확인되지 않은 명령어/,
+  /시스템을 변경할 수 있는/,
+  /항상 허용.*답하세요/,
+  /사용자에게 설명하고/,
+];
+
+function isDenyMessage(text) {
+  return DENY_MESSAGE_PATTERNS.some(p => p.test(text));
+}
+
+function checkAlwaysAllow(transcriptPath) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return false;
+
+  try {
+    const content = readFileSync(transcriptPath, 'utf8');
+    const lines = content.trim().split('\n');
+    const recentLines = lines.slice(-5);
+
+    for (let i = recentLines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(recentLines[i]);
+        if (entry.type !== 'user') continue;
+
+        const msgContent = entry.message?.content ?? entry.content;
+        let text = '';
+        if (typeof msgContent === 'string') {
+          if (msgContent.startsWith('<')) continue;
+          text = msgContent;
+        } else if (Array.isArray(msgContent)) {
+          for (const block of msgContent) {
+            if (block.type === 'text' && block.text && !block.text.startsWith('<')) {
+              text += ' ' + block.text;
+            }
+            if (block.type === 'tool_result' && typeof block.content === 'string') {
+              if (!isDenyMessage(block.content)) text += ' ' + block.content;
+            }
+          }
+        }
+
+        text = text.trim();
+        if (!text) continue;
+        if (ALWAYS_ALLOW_KEYWORDS.some(kw => kw.test(text))) return true;
+      } catch { /* skip */ }
+    }
+    return false;
+  } catch { return false; }
 }
 
 // --- 배치 승인 ---
@@ -167,8 +298,8 @@ function checkUserApproval(transcriptPath) {
               text += ' ' + block.text;
             }
             if (block.type === 'tool_result' && typeof block.content === 'string') {
-              // "User has answered your questions: \"...\"=\"진행\"" 형식
-              text += ' ' + block.content;
+              // hook deny 메시지 제외, AskUserQuestion 응답만 포함
+              if (!isDenyMessage(block.content)) text += ' ' + block.content;
             }
           }
         }
@@ -278,55 +409,81 @@ if (toolName !== 'Bash' || !command) {
 
 debug(`Command: ${command}`);
 
-// --- 1단계: 규칙 기반 판단 ---
-const ruleResult = analyzeByRules(command);
-debug(`Step 1 (rules): ${ruleResult}`);
-
-if (ruleResult === 'readonly') {
-  outputAllow('Rule-based: read-only command');
-  process.exit(0);
-}
-
-// modifying이면 캐시/LLM 유저 의도 확인으로 넘김 (유저가 요청했을 수 있음)
-// readonly도 ambiguous도 아닌 경우 → 2~3단계 스킵하고 4단계(캐시/LLM)로 직행
-if (ruleResult === 'modifying') {
-  debug('Step 1: modifying detected, checking user intent...');
-
-  // 배치 승인 확인 (이미 approved 배치가 있으면 바로 allow)
-  const batch = loadBatch();
-  if (batch && batch.sessionId === input.session_id && batch.status === 'approved') {
-    if (batch.commands.includes(command)) {
-      debug('Step 1→batch: approved (batch contains this command)');
-      outputAllow('Batch: previously batch-approved command');
+// --- 0단계: "항상 허용" 응답 확인 ---
+// 사용자가 직전 deny에 대해 "항상 허용"으로 응답했는지 확인
+const alwaysAllowBatch = loadBatch();
+if (alwaysAllowBatch && alwaysAllowBatch.sessionId === input.session_id && alwaysAllowBatch.status === 'pending') {
+  if (checkAlwaysAllow(input.transcript_path)) {
+    debug('Step 0: "항상 허용" detected, adding commands to readonly cache');
+    const cache = loadReadonlyCache();
+    for (const cmd of alwaysAllowBatch.commands) {
+      const normalized = normalizeCommand(cmd);
+      cache.commands[normalized] = {
+        type: 'readonly',
+        source: 'user',
+        original: cmd,
+        addedAt: new Date().toISOString(),
+      };
+    }
+    saveReadonlyCache(cache);
+    clearBatch();
+    // 현재 명령이 방금 허용된 배치에 포함되면 바로 allow
+    if (alwaysAllowBatch.commands.includes(command)) {
+      outputAllow('User always-allow: command added to readonly cache');
       process.exit(0);
     }
   }
+}
 
-  // 캐시 확인
-  const cached = checkCache(input.session_id, command);
-  debug(`Step 1→cache: ${cached ?? 'miss'}`);
-  if (cached === 'approve') {
-    outputAllow('Cached: previously approved command');
-    process.exit(0);
+// --- 1단계: 배치 승인 확인 (기존 approved 배치) ---
+const batch = loadBatch();
+if (batch && batch.sessionId === input.session_id) {
+  if (batch.status === 'approved') {
+    if (batch.commands.includes(command)) {
+      debug('Step 1: batch approved');
+      outputAllow('Batch: previously approved command');
+      process.exit(0);
+    }
   }
-  // LLM 유저 의도 확인
-  const userContext = getRecentUserMessages(input.transcript_path);
-  debug(`Step 1→LLM: userContext="${userContext?.slice(0, 100)}..."`);
-  const llmResult = askClaude(command, null, input.cwd, userContext);
-  debug(`Step 1→LLM result: ${llmResult}`);
-  if (llmResult === 'approve') {
-    updateCache(input.session_id, command, 'approve');
-    outputAllow('LLM: user-consented modifying command');
-    process.exit(0);
+  if (batch.status === 'pending') {
+    if (checkUserApproval(input.transcript_path)) {
+      debug('Step 1: user approval detected for pending batch');
+      batch.status = 'approved';
+      saveBatch(batch);
+      if (batch.commands.includes(command)) {
+        updateCache(input.session_id, command, 'approve');
+        outputAllow('Batch: user approved');
+        process.exit(0);
+      }
+    }
+    // pending 배치에 포함된 명령 → 다시 deny
+    if (batch.commands.includes(command)) {
+      debug('Step 1: command in pending batch, re-denying');
+      outputDeny(batch.summary);
+      process.exit(0);
+    }
   }
-  // LLM도 approve 안 함 → 배치 승인 플로우
-  handleBatchApproval(command, input);
+}
+
+// --- 2단계: 승인 캐시 확인 (기존 approve 캐시) ---
+const approvalCached = checkCache(input.session_id, command);
+debug(`Step 2 (approval cache): ${approvalCached ?? 'miss'}`);
+if (approvalCached === 'approve') {
+  outputAllow('Cached: previously approved command');
   process.exit(0);
 }
 
-// --- 2단계: npm/yarn/pnpm scripts 분석 ---
-// compound 명령(cd ... && npm run dev)에서 각 서브커맨드를 확인
-const subCommands = command.split(/\s*&&\s*|\s*\|\|\s*|\s*;\s*/).map(s => s.trim()).filter(Boolean);
+// --- 3단계: readonly 캐시 기반 분류 (합성 명령어 분해) ---
+const { result: classifyResult, unknownParts } = classifyCommand(command);
+debug(`Step 3 (classify): ${classifyResult}`);
+
+if (classifyResult === 'readonly') {
+  outputAllow('Readonly cache: all sub-commands are cached readonly');
+  process.exit(0);
+}
+
+// --- 4단계: npm scripts / 스크립트 정적 분석 (기존 로직 유지) ---
+const subCommands = splitShellCommand(command);
 let npmScript = null;
 for (const sub of subCommands) {
   npmScript = extractNpmScript(sub);
@@ -334,21 +491,15 @@ for (const sub of subCommands) {
 }
 if (npmScript) {
   const effectiveCwd = resolveCdTarget(command, input.cwd) || input.cwd;
-  debug(`Step 2 (npm): script="${npmScript}", cwd="${effectiveCwd}"`);
+  debug(`Step 4a (npm): script="${npmScript}", cwd="${effectiveCwd}"`);
   const npmResult = analyzeNpmScript(npmScript, effectiveCwd);
   if (npmResult === 'readonly') {
     updateCache(input.session_id, command, 'approve');
     outputAllow(`npm script analysis: "${npmScript}" resolved to read-only command`);
     process.exit(0);
   }
-  if (npmResult === 'modifying') {
-    debug('Step 2: npm script is modifying, checking user intent...');
-    // modifying이지만 사용자가 요청했을 수 있으므로 4→5단계로 진행
-  }
-  // ambiguous → 3단계로 계속
 }
 
-// --- 3단계: 스크립트 파일 내용 정적 분석 ---
 const scriptPath = extractScriptPath(command);
 if (scriptPath) {
   const staticResult = analyzeScriptContent(scriptPath, input.cwd);
@@ -356,32 +507,26 @@ if (scriptPath) {
     outputAllow('Static analysis: no write operations found in script');
     process.exit(0);
   }
-  if (staticResult === 'modifying') {
-    debug('Step 3: script content is modifying, checking user intent...');
-    // modifying이지만 사용자가 요청했을 수 있으므로 4→5단계로 진행
-  }
 }
 
-// --- 4단계: 승인 캐시 확인 ---
-const cached = checkCache(input.session_id, command);
-debug(`Step 4 (cache): ${cached ?? 'miss'}`);
-if (cached === 'approve') {
-  outputAllow('Cached: previously approved command');
-  process.exit(0);
-}
-
-// --- 5단계: Claude에게 판단 위임 (애매한 경우만) ---
+// --- 5단계: LLM 유저 의도 확인 ---
 const userContext = getRecentUserMessages(input.transcript_path);
-debug(`Step 5 (LLM): transcript="${input.transcript_path}", userContext="${userContext?.slice(0, 100)}..."`);
-const llmResult = askClaude(command, scriptPath, input.cwd, userContext);
+debug(`Step 5 (LLM): userContext="${userContext?.slice(0, 100)}..."`);
+const llmResult = askClaude(command, scriptPath || null, input.cwd, userContext);
 debug(`Step 5 result: ${llmResult}`);
 if (llmResult === 'approve') {
   updateCache(input.session_id, command, 'approve');
-  outputAllow('LLM analysis: approved (read-only or user-consented)');
+  outputAllow('LLM: approved (user-consented)');
   process.exit(0);
 }
 
-// modifying이거나 판단 불가 → 배치 승인 플로우 시도
+// --- 6단계: deny + 비동기 LLM readonly 판단 spawn ---
+// unknown 구성요소에 대해 백그라운드 LLM 판단 실행
+for (const part of unknownParts) {
+  spawnAsyncLlmCheck(part);
+}
+
+// 배치 승인 플로우
 handleBatchApproval(command, input);
 process.exit(0);
 
@@ -415,8 +560,9 @@ function analyzeNpmScript(scriptName, cwd) {
   const actualCommand = pkg.scripts?.[scriptName];
   if (!actualCommand) return 'ambiguous';
 
-  // 실제 명령어를 규칙 기반으로 분석
-  return analyzeByRules(actualCommand);
+  // 실제 명령어를 캐시 기반으로 분류
+  const { result } = classifyCommand(actualCommand);
+  return result === 'readonly' ? 'readonly' : 'ambiguous';
 }
 
 function findPackageJson(startDir) {
@@ -430,40 +576,6 @@ function findPackageJson(startDir) {
     dir = parent;
   }
   return null;
-}
-
-function unwrapPowershell(cmd) {
-  // powershell -Command "..." 패턴에서 내부 명령을 추출
-  const match = cmd.match(/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*-Command\s+["'](.+?)["']\s*$/i);
-  if (match) {
-    return match[1];
-  }
-  return cmd;
-}
-
-function analyzeByRules(cmd) {
-  // powershell -Command "..." 래핑 해제
-  cmd = unwrapPowershell(cmd);
-
-  // 따옴표/서브셸을 인식하는 분할 (따옴표 안의 ;|는 분할하지 않음)
-  const subCommands = splitShellCommand(cmd);
-
-  let hasModifying = false;
-  for (const sub of subCommands) {
-    if (MODIFYING_PATTERNS.some(p => p.test(sub))) {
-      hasModifying = true;
-      break;
-    }
-  }
-  if (hasModifying) return 'modifying';
-
-  // 모든 서브커맨드가 readonly여야 readonly
-  const allReadonly = subCommands.every(sub =>
-    READONLY_PATTERNS.some(p => p.test(sub))
-  );
-  if (allReadonly) return 'readonly';
-
-  return 'ambiguous';
 }
 
 function analyzeScriptContent(scriptFile, cwd) {
@@ -762,10 +874,15 @@ function handleBatchApproval(command, input) {
   const plannedCommands = extractPlannedCommands(input.transcript_path);
   debug(`Batch: extracted ${plannedCommands.length} planned commands`);
 
-  // modifying 명령어만 필터링
+  // readonly 캐시에 없는 명령어만 필터링 (승인 필요)
+  const readonlyCache = loadReadonlyCache();
   let modifyingCommands = plannedCommands.filter(cmd => {
-    const result = analyzeByRules(cmd);
-    return result === 'modifying' || result === 'ambiguous';
+    const parts = splitShellCommand(cmd);
+    // 모든 구성요소가 readonly 캐시에 있으면 제외
+    return !parts.every(part => {
+      const normalized = normalizeCommand(part);
+      return readonlyCache.commands[normalized]?.type === 'readonly';
+    });
   });
 
   // 계획된 명령이 없거나 필터링 결과가 비어있으면 현재 명령만으로 배치 생성
@@ -773,9 +890,10 @@ function handleBatchApproval(command, input) {
     modifyingCommands = [command];
   }
 
-  // 요약 메시지 생성 (에이전트가 보고 사용자에게 권한 요청하도록 지시)
-  const summary = '다음 명령어는 시스템을 변경할 수 있는 작업입니다. 사용자에게 설명하고 승인을 받으세요:\n' +
-    modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n');
+  // 요약 메시지 생성
+  const summary = '확인되지 않은 명령어입니다. 사용자 승인이 필요합니다:\n' +
+    modifyingCommands.map((cmd, i) => `${i + 1}. ${cmd}`).join('\n') +
+    '\n\n💡 이 명령어가 읽기 전용(안전한 명령어)이라면, "항상 허용"이라고 답하세요.\n   다음부터는 자동으로 승인됩니다.';
 
   // 배치 저장
   const newBatch = {
